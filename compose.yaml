@@ -1,0 +1,62 @@
+x-app: &app
+  build: .
+  environment: &environment
+    API_KEY: ${API_KEY:?Copy .env.example to .env first}
+    DATABASE_URL: postgresql+asyncpg://payments:payments@postgres:5432/payments
+    RABBITMQ_URL: amqp://payments:payments@rabbitmq:5672/
+    RETRY_BASE_SECONDS: ${RETRY_BASE_SECONDS:-2}
+    WEBHOOK_TIMEOUT_SECONDS: ${WEBHOOK_TIMEOUT_SECONDS:-10}
+    OUTBOX_POLL_SECONDS: ${OUTBOX_POLL_SECONDS:-1}
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: payments
+      POSTGRES_PASSWORD: payments
+      POSTGRES_DB: payments
+    ports: ['127.0.0.1:${POSTGRES_PORT:-5432}:5432']
+    volumes: ['postgres_data:/var/lib/postgresql/data']
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U payments -d payments']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  rabbitmq:
+    image: rabbitmq:4.1-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: payments
+      RABBITMQ_DEFAULT_PASS: payments
+    ports: ['127.0.0.1:5672:5672', '127.0.0.1:15672:15672']
+    volumes: ['rabbitmq_data:/var/lib/rabbitmq']
+    healthcheck:
+      test: ['CMD', 'rabbitmq-diagnostics', '-q', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 30
+  migrate:
+    <<: *app
+    command: ['alembic', 'upgrade', 'head']
+    restart: 'no'
+    depends_on:
+      postgres: {condition: service_healthy}
+  api:
+    <<: *app
+    ports: ['8000:8000']
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+    healthcheck:
+      test: ['CMD', 'python', '-c', 'import os, urllib.request; urllib.request.urlopen(urllib.request.Request("http://localhost:8000/health", headers={"X-API-Key": os.environ["API_KEY"]}))']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  consumer:
+    <<: *app
+    command: ['faststream', 'run', 'app.consumer:app']
+    depends_on:
+      migrate: {condition: service_completed_successfully}
+      rabbitmq: {condition: service_healthy}
+volumes:
+  postgres_data:
+  rabbitmq_data:
